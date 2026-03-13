@@ -1,596 +1,286 @@
 #!/usr/bin/env python3
 """
-⚽ Football CLV (Closing Line Value) Betting Model
-====================================================
-Monitors odds movement across bookmakers and generates signals
-when smart money moves the line significantly.
-
-Strategy (backtested on 110K+ Bet365 matches):
-- Away Win: CLV >= 0.30, opening odds 2.00-3.50 → ROI +20-22%
-- Home Win: CLV >= 0.30, opening odds 1.80-2.30 → ROI +20%
-- Volume: ~1-3 signals per day
-
-Usage:
-    python clv_monitor.py                     # Run monitor (continuous)
-    python clv_monitor.py --scan              # Single scan, show signals
-    python clv_monitor.py --backtest          # Validate on historical data
-    python clv_monitor.py --backtest-file data/bet365_historical.csv
-
-Environment:
-    ODDS_API_KEY=your_key_here                # from the-odds-api.com
+Football CLV Monitor v2.0 - Free Tier Optimized
+Flashscore (224 leagues, free schedule) + the-odds-api (50 leagues, targeted odds)
 """
-
-import argparse
-import csv
-import json
-import os
-import sys
-import time
+import argparse, csv, json, os, sys, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import requests
 
-# ============================================================================
-# CONFIG
-# ============================================================================
-
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+ODDS_API_KEYS = [k for k in [os.environ.get("ODDS_API_KEY",""), os.environ.get("ODDS_API_KEY_2","")] if k]
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
+FLASHSCORE_FEED = "https://www.flashscore.com/x/feed/f_1_0_1_en-gb_1"
 
-# Top priority leagues (1 API request each)
-# Free tier = 500 req/month ≈ 16/day
-# 6 leagues × 2 scans/day = 12 requests = safe
-LEAGUES = {
-    "soccer_epl": "🏴 EPL",
-    "soccer_spain_la_liga": "🇪🇸 LaLiga",
-    "soccer_germany_bundesliga": "🇩🇪 Bundesliga",
-    "soccer_italy_serie_a": "🇮🇹 Serie A",
-    "soccer_france_ligue_one": "🇫🇷 Ligue 1",
-    "soccer_efl_champ": "🏴 Championship",
+ODDS_API_LEAGUES = {
+    "soccer_epl":"ENGLAND: Premier League","soccer_efl_champ":"ENGLAND: Championship",
+    "soccer_england_league1":"ENGLAND: League 1","soccer_england_league2":"ENGLAND: League 2",
+    "soccer_spain_la_liga":"SPAIN: LaLiga","soccer_spain_segunda_division":"SPAIN: LaLiga 2",
+    "soccer_germany_bundesliga":"GERMANY: Bundesliga","soccer_germany_bundesliga2":"GERMANY: 2. Bundesliga",
+    "soccer_germany_liga3":"GERMANY: 3. Liga","soccer_italy_serie_a":"ITALY: Serie A",
+    "soccer_italy_serie_b":"ITALY: Serie B","soccer_france_ligue_one":"FRANCE: Ligue 1",
+    "soccer_france_ligue_two":"FRANCE: Ligue 2","soccer_netherlands_eredivisie":"NETHERLANDS: Eredivisie",
+    "soccer_portugal_primeira_liga":"PORTUGAL: Primeira Liga","soccer_turkey_super_league":"TURKEY: Super Lig",
+    "soccer_belgium_first_div":"BELGIUM: First Div","soccer_denmark_superliga":"DENMARK: Superliga",
+    "soccer_sweden_allsvenskan":"SWEDEN: Allsvenskan","soccer_norway_eliteserien":"NORWAY: Eliteserien",
+    "soccer_austria_bundesliga":"AUSTRIA: Bundesliga","soccer_switzerland_superleague":"SWITZERLAND: Super League",
+    "soccer_greece_super_league":"GREECE: Super League","soccer_poland_ekstraklasa":"POLAND: Ekstraklasa",
+    "soccer_spl":"SCOTLAND: Premiership","soccer_russia_premier_league":"RUSSIA: Premier League",
+    "soccer_usa_mls":"USA: MLS","soccer_mexico_ligamx":"MEXICO: Liga MX",
+    "soccer_brazil_campeonato":"BRAZIL: Serie A","soccer_brazil_serie_b":"BRAZIL: Serie B",
+    "soccer_argentina_primera_division":"ARGENTINA: Primera Division",
+    "soccer_chile_campeonato":"CHILE: Primera Division","soccer_japan_j_league":"JAPAN: J1 League",
+    "soccer_korea_kleague1":"KOREA: K League 1","soccer_china_superleague":"CHINA: Super League",
+    "soccer_australia_aleague":"AUSTRALIA: A-League","soccer_saudi_arabia_pro_league":"SAUDI ARABIA: Pro League",
+    "soccer_league_of_ireland":"IRELAND: Premier Division",
+    "soccer_uefa_champs_league":"EUROPE: Champions League",
+    "soccer_uefa_europa_league":"EUROPE: Europa League",
+    "soccer_uefa_europa_conference_league":"EUROPE: Conference League",
+    "soccer_fa_cup":"ENGLAND: FA Cup","soccer_spain_copa_del_rey":"SPAIN: Copa del Rey",
+    "soccer_germany_dfb_pokal":"GERMANY: DFB-Pokal","soccer_france_coupe_de_france":"FRANCE: Coupe de France",
 }
 
-# Bookmakers to track (pinnacle = sharpest line, best for CLV)
-BOOKMAKERS = "pinnacle,bet365,williamhill,unibet"
-
-# Strategy parameters (from 110K match backtest)
 STRATEGIES = {
-    "away_win": {
-        "name": "AWAY WIN",
-        "emoji": "✈️",
-        "clv_min": 0.30,
-        "odds_ranges": [
-            {"min": 2.00, "max": 2.70, "label": "medium", "hist_wr": 0.508, "hist_roi": 19.9},
-            {"min": 2.50, "max": 3.50, "label": "high", "hist_wr": 0.416, "hist_roi": 22.5},
-        ],
-    },
-    "home_win": {
-        "name": "HOME WIN",
-        "emoji": "🏠",
-        "clv_min": 0.30,
-        "odds_ranges": [
-            {"min": 1.80, "max": 2.30, "label": "standard", "hist_wr": 0.581, "hist_roi": 20.0},
-            {"min": 2.00, "max": 2.70, "label": "value", "hist_wr": 0.506, "hist_roi": 15.8},
-        ],
-    },
+    "away_win":{"name":"AWAY WIN","emoji":"✈️","clv_min":0.30,"ranges":[
+        {"min":1.80,"max":2.20,"hist_wr":0.593,"hist_roi":19.4},
+        {"min":2.00,"max":2.70,"hist_wr":0.508,"hist_roi":19.9},
+        {"min":2.50,"max":3.50,"hist_wr":0.416,"hist_roi":22.5}]},
+    "home_win":{"name":"HOME WIN","emoji":"🏠","clv_min":0.30,"ranges":[
+        {"min":1.80,"max":2.30,"hist_wr":0.581,"hist_roi":20.0},
+        {"min":2.00,"max":2.70,"hist_wr":0.506,"hist_roi":15.8}]},
 }
 
-# Kelly criterion
-KELLY_FRACTION = 0.25  # quarter-Kelly for safety
-DEFAULT_BANKROLL = 1000
+DATA_DIR = Path("data"); LOG_FILE = DATA_DIR/"bet_log.csv"
+SNAPSHOTS_FILE = DATA_DIR/"odds_snapshots.json"; BUDGET_FILE = DATA_DIR/"api_budget.json"
+SCAN_INTERVAL = 30; HOURS_WINDOW = 3; KELLY_FRAC = 0.25
 
-# File paths
-DATA_DIR = Path("data")
-LOG_FILE = DATA_DIR / "bet_log.csv"
-SNAPSHOTS_FILE = DATA_DIR / "odds_snapshots.json"
-
-# Scan interval
-SCAN_INTERVAL_MINUTES = 30
-
-
-# ============================================================================
-# ODDS API
-# ============================================================================
-
-def fetch_odds(sport: str, bookmakers: str = BOOKMAKERS) -> list:
-    """Fetch current odds from the-odds-api.com."""
-    if not ODDS_API_KEY:
-        print("  ⚠️  ODDS_API_KEY not set. Get free key at https://the-odds-api.com")
-        return []
-
-    url = f"{ODDS_API_BASE}/sports/{sport}/odds"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "uk,eu",
-        "markets": "h2h",
-        "oddsFormat": "decimal",
-        "bookmakers": bookmakers,
-    }
-
+# ── Flashscore ──
+def fetch_schedule():
+    headers = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36","X-Fsign":"SW9D1eZo"}
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code == 401:
-            print("  ❌ Invalid API key")
-            return []
-        if resp.status_code == 429:
-            print("  ❌ API rate limit hit. Wait or upgrade plan.")
-            return []
-        resp.raise_for_status()
-
-        # Track remaining requests
-        remaining = resp.headers.get("x-requests-remaining", "?")
-        used = resp.headers.get("x-requests-used", "?")
-        print(f"  📡 API: {remaining} requests remaining ({used} used)")
-
-        return resp.json()
-    except requests.RequestException as e:
-        print(f"  ❌ API error: {e}")
-        return []
-
-
-def parse_odds(events: list) -> list:
-    """Parse API response into clean match data."""
-    matches = []
-    for event in events:
-        match = {
-            "id": event["id"],
-            "sport": event["sport_key"],
-            "league": LEAGUES.get(event["sport_key"], event["sport_key"]),
-            "home": event["home_team"],
-            "away": event["away_team"],
-            "kickoff": event["commence_time"],
-            "bookmakers": {},
-        }
-
-        for bm in event.get("bookmakers", []):
-            bm_name = bm["key"]
-            for market in bm.get("markets", []):
-                if market["key"] == "h2h":
-                    outcomes = {o["name"]: o["price"] for o in market["outcomes"]}
-                    match["bookmakers"][bm_name] = {
-                        "home": outcomes.get(event["home_team"], 0),
-                        "draw": outcomes.get("Draw", 0),
-                        "away": outcomes.get(event["away_team"], 0),
-                        "updated": bm["last_update"],
-                    }
-
-        if match["bookmakers"]:
-            matches.append(match)
-
+        r = requests.get(FLASHSCORE_FEED, headers=headers, timeout=15)
+        if r.status_code != 200 or len(r.text) < 100: return []
+    except: return []
+    matches, league, now = [], None, time.time()
+    for line in r.text.split("~"):
+        f = {}
+        for p in line.split("\xac"):
+            if "\xf7" in p: k,v = p.split("\xf7",1); f[k]=v
+        if "ZA" in f: league = f["ZA"]
+        if "AA" in f and "AE" in f:
+            ts = int(f.get("AD","0"))
+            if ts > now:
+                matches.append({"fs_id":f["AA"],"home":f.get("AE",""),"away":f.get("AF",""),
+                    "league":league or "","kickoff_ts":ts,
+                    "kickoff":datetime.fromtimestamp(ts,tz=timezone.utc).isoformat(),
+                    "hours_until":(ts-now)/3600})
     return matches
 
+def match_to_api(league):
+    if not league: return ""
+    u = league.upper()
+    for k,v in ODDS_API_LEAGUES.items():
+        parts = v.upper().split(": ")
+        if len(parts)==2 and parts[0] in u and parts[1] in u: return k
+    return ""
 
-# ============================================================================
-# SNAPSHOT MANAGEMENT
-# ============================================================================
+# ── Odds API ──
+def fetch_odds(sport):
+    key = next((k for k in ODDS_API_KEYS if k), "")
+    if not key: return []
+    try:
+        r = requests.get(f"{ODDS_API_BASE}/sports/{sport}/odds",
+            params={"apiKey":key,"regions":"uk,eu","markets":"h2h","oddsFormat":"decimal"}, timeout=15)
+        if r.status_code in (401,429,404): return []
+        r.raise_for_status()
+        rem = r.headers.get("x-requests-remaining","?")
+        _save_budget(rem)
+        return r.json()
+    except: return []
 
-def load_snapshots() -> dict:
-    """Load saved opening odds snapshots."""
+def parse_odds(events):
+    out = {}
+    for e in events:
+        h, a = e["home_team"], e["away_team"]
+        for bm in e.get("bookmakers",[]):
+            for mkt in bm.get("markets",[]):
+                if mkt["key"]=="h2h":
+                    oc = {o["name"]:o["price"] for o in mkt["outcomes"]}
+                    k = f"{h}|{a}|{e['commence_time']}"
+                    if k not in out:
+                        out[k] = {"home":h,"away":a,"kickoff":e["commence_time"],"bm":bm["key"],
+                            "home_odds":oc.get(h,0),"draw_odds":oc.get("Draw",0),"away_odds":oc.get(a,0)}
+    return out
+
+# ── Budget ──
+def _save_budget(rem):
+    DATA_DIR.mkdir(exist_ok=True)
+    b = _load_budget(); today = datetime.now().strftime("%Y-%m-%d")
+    if b.get("date") != today: b["date"]=today; b["used"]=0
+    b["remaining"]=rem; b["used"]=b.get("used",0)+1
+    with open(BUDGET_FILE,"w") as f: json.dump(b,f)
+def _load_budget():
+    if BUDGET_FILE.exists():
+        with open(BUDGET_FILE) as f: return json.load(f)
+    return {"remaining":"?","used":0,"date":""}
+
+# ── Snapshots & CLV ──
+def load_snap():
     if SNAPSHOTS_FILE.exists():
-        with open(SNAPSHOTS_FILE) as f:
-            return json.load(f)
+        with open(SNAPSHOTS_FILE) as f: return json.load(f)
     return {}
-
-
-def save_snapshots(snapshots: dict):
-    """Save odds snapshots."""
+def save_snap(s):
     DATA_DIR.mkdir(exist_ok=True)
-    with open(SNAPSHOTS_FILE, "w") as f:
-        json.dump(snapshots, f, indent=2)
+    now=time.time(); cl={k:v for k,v in s.items() if v.get("ts",0)>now-48*3600}
+    with open(SNAPSHOTS_FILE,"w") as f: json.dump(cl,f,indent=2)
 
+def record(key, odds, snap):
+    if key not in snap:
+        ts=0
+        try: ts=datetime.fromisoformat(odds["kickoff"].replace("Z","+00:00")).timestamp()
+        except: pass
+        snap[key]={"home":odds["home"],"away":odds["away"],"kickoff":odds["kickoff"],"ts":ts,
+            "op_h":odds["home_odds"],"op_d":odds["draw_odds"],"op_a":odds["away_odds"],"bm":odds.get("bm","")}
+    return snap
 
-def update_snapshots(matches: list, snapshots: dict) -> dict:
-    """
-    Record opening odds for new matches.
-    Only saves the FIRST odds seen (opening line).
-    """
-    for match in matches:
-        match_key = f"{match['home']}_{match['away']}_{match['kickoff']}"
+def check_clv(key, cur, snap):
+    s = snap.get(key)
+    if not s: return None
+    hrs = (s.get("ts",0)-time.time())/3600
+    if hrs<-0.5 or hrs>HOURS_WINDOW: return None
+    for sk,cfg in STRATEGIES.items():
+        op = s["op_a"] if sk=="away_win" else s["op_h"]
+        cr = cur["away_odds"] if sk=="away_win" else cur["home_odds"]
+        if op<=0 or cr<=0: continue
+        clv = op-cr
+        if clv<cfg["clv_min"]: continue
+        for rng in cfg["ranges"]:
+            if rng["min"]<=op<=rng["max"]:
+                imp=1/op; prob=min(imp+clv*0.3,0.75)
+                edge=prob*op-1; kelly=max(0,min((edge/(op-1))*KELLY_FRAC,0.10)) if edge>0 else 0
+                team = s["away"] if sk=="away_win" else s["home"]
+                return {"key":key,"strat":sk,"emoji":cfg["emoji"],"name":cfg["name"],
+                    "home":s["home"],"away":s["away"],"pick":f"{team} ({'away' if sk=='away_win' else 'home'})",
+                    "op":round(op,2),"cur":round(cr,2),"clv":round(clv,3),"kickoff":s["kickoff"],
+                    "hrs":round(hrs,1),"kelly":round(kelly*100,1),"wr":rng["hist_wr"],"roi":rng["hist_roi"]}
+    return None
 
-        if match_key not in snapshots:
-            # First time seeing this match — record opening odds
-            best_bm = _get_best_bookmaker(match)
-            if best_bm:
-                snapshots[match_key] = {
-                    "id": match["id"],
-                    "home": match["home"],
-                    "away": match["away"],
-                    "league": match["league"],
-                    "sport": match["sport"],
-                    "kickoff": match["kickoff"],
-                    "opening": best_bm,
-                    "recorded_at": datetime.now(timezone.utc).isoformat(),
-                }
+def log_sig(s):
+    DATA_DIR.mkdir(exist_ok=True); ex=LOG_FILE.exists()
+    with open(LOG_FILE,"a",newline="") as f:
+        w=csv.DictWriter(f,["ts","home","away","strat","pick","op","cur","clv","kelly","kickoff","result","pnl"])
+        if not ex: w.writeheader()
+        w.writerow({"ts":datetime.now().isoformat(),"home":s["home"],"away":s["away"],"strat":s["strat"],
+            "pick":s["pick"],"op":s["op"],"cur":s["cur"],"clv":s["clv"],"kelly":s["kelly"],"kickoff":s["kickoff"],"result":"","pnl":""})
 
-    save_snapshots(snapshots)
-    return snapshots
+# ── Main Scan ──
+def scan(verbose=True):
+    if verbose: print_hdr()
+    if verbose: print("  📡 Fetching Flashscore schedule (free)...")
+    sched = fetch_schedule()
+    leagues = set(m["league"] for m in sched)
+    if verbose: print(f"     {len(sched)} matches, {len(leagues)} leagues")
+    soon = [m for m in sched if m["hours_until"]<=HOURS_WINDOW]
+    if verbose: print(f"  ⏰ {len(soon)} matches within {HOURS_WINDOW}h")
+    need = set(match_to_api(m["league"]) for m in soon) - {""}
+    if verbose:
+        b=_load_budget(); print(f"  🎯 {len(need)} leagues to fetch | Budget: {b.get('remaining','?')} left")
+    snap = load_snap(); sigs = []
+    if not need:
+        if verbose:
+            nxt=[m for m in sched if match_to_api(m["league"]) and m["hours_until"]<=12]
+            nxt.sort(key=lambda x:x["hours_until"])
+            if nxt:
+                print(f"\n  📅 Next covered matches:")
+                for m in nxt[:8]: print(f"     {m['hours_until']:.1f}h | {m['league']}: {m['home']} vs {m['away']}")
+        save_snap(snap); return sigs
+    if verbose: print(f"\n  🔍 Fetching odds...")
+    for lk in need:
+        ln=ODDS_API_LEAGUES.get(lk,lk)
+        evts=fetch_odds(lk)
+        if not evts: continue
+        od=parse_odds(evts)
+        if verbose: print(f"     {ln}: {len(od)} matches")
+        for k,o in od.items():
+            snap=record(k,o,snap)
+            sig=check_clv(k,o,snap)
+            if sig: sig["league"]=ln; sigs.append(sig)
+    save_snap(snap)
+    if verbose: print_sigs(sigs); print_status(snap,sched)
+    for s in sigs: log_sig(s)
+    return sigs
 
+def show_schedule():
+    print_hdr(); print("  📅 SCHEDULE (free from Flashscore)\n")
+    sched=fetch_schedule(); today=[m for m in sched if m["hours_until"]<=24]
+    today.sort(key=lambda x:x["kickoff_ts"])
+    by_l={}
+    for m in today: by_l.setdefault(m["league"],[]).append(m)
+    cov=ncov=0
+    for l in sorted(by_l):
+        ms=by_l[l]; api=match_to_api(l); mk="✅" if api else "  "
+        if api: cov+=len(ms)
+        else: ncov+=len(ms)
+        print(f"  {mk} {l} ({len(ms)})")
+        for m in ms:
+            h=int(m["hours_until"]); mn=int((m["hours_until"]-h)*60)
+            print(f"      {h}h{mn:02d}m | {m['home']} vs {m['away']}")
+    print(f"\n  Total: {len(today)} | ✅ Covered: {cov} | No odds: {ncov}")
 
-def _get_best_bookmaker(match: dict) -> dict:
-    """Get odds from best available bookmaker (prefer bet365 > pinnacle)."""
-    for bm in ["bet365", "pinnacle", "williamhill"]:
-        if bm in match["bookmakers"]:
-            return match["bookmakers"][bm]
-    # Fallback: first available
-    if match["bookmakers"]:
-        return list(match["bookmakers"].values())[0]
-    return {}
-
-
-# ============================================================================
-# CLV CALCULATION & SIGNAL DETECTION
-# ============================================================================
-
-def calculate_clv(opening: dict, current: dict) -> dict:
-    """
-    Calculate CLV for all outcomes.
-    Positive CLV = line moved toward this outcome (smart money).
-    """
-    return {
-        "home": opening.get("home", 0) - current.get("home", 0),
-        "draw": opening.get("draw", 0) - current.get("draw", 0),
-        "away": opening.get("away", 0) - current.get("away", 0),
-    }
-
-
-def check_signals(matches: list, snapshots: dict) -> list:
-    """
-    Check all matches for CLV signals.
-    Returns list of actionable signals.
-    """
-    signals = []
-    now = datetime.now(timezone.utc)
-
-    for match in matches:
-        match_key = f"{match['home']}_{match['away']}_{match['kickoff']}"
-        snapshot = snapshots.get(match_key)
-
-        if not snapshot:
-            continue
-
-        # Only check matches within 2 hours of kickoff
-        try:
-            kickoff = datetime.fromisoformat(match["kickoff"].replace("Z", "+00:00"))
-        except:
-            continue
-
-        hours_to_kick = (kickoff - now).total_seconds() / 3600
-        if hours_to_kick < 0 or hours_to_kick > 3:
-            continue
-
-        # Get current best odds
-        current = _get_best_bookmaker(match)
-        if not current:
-            continue
-
-        opening = snapshot["opening"]
-        clv = calculate_clv(opening, current)
-
-        # Check Away Win signal
-        for strat_key, strat in STRATEGIES.items():
-            if strat_key == "away_win":
-                opening_odds = opening.get("away", 0)
-                current_odds = current.get("away", 0)
-                clv_value = clv["away"]
-                outcome_label = f"{match['away']} (away)"
-            elif strat_key == "home_win":
-                opening_odds = opening.get("home", 0)
-                current_odds = current.get("home", 0)
-                clv_value = clv["home"]
-                outcome_label = f"{match['home']} (home)"
-            else:
-                continue
-
-            if clv_value < strat["clv_min"]:
-                continue
-
-            # Check if opening odds fit any range
-            for odds_range in strat["odds_ranges"]:
-                if odds_range["min"] <= opening_odds <= odds_range["max"]:
-                    # Calculate Kelly stake
-                    implied_prob = 1 / opening_odds
-                    estimated_prob = implied_prob + (clv_value * 0.3)  # rough adjustment
-                    estimated_prob = min(estimated_prob, 0.75)
-                    kelly = _kelly_criterion(estimated_prob, opening_odds)
-
-                    signals.append({
-                        "match_key": match_key,
-                        "strategy": strat_key,
-                        "emoji": strat["emoji"],
-                        "name": strat["name"],
-                        "league": match["league"],
-                        "home": match["home"],
-                        "away": match["away"],
-                        "pick": outcome_label,
-                        "opening_odds": round(opening_odds, 2),
-                        "current_odds": round(current_odds, 2),
-                        "clv": round(clv_value, 3),
-                        "kickoff": match["kickoff"],
-                        "hours_to_kick": round(hours_to_kick, 1),
-                        "kelly_pct": round(kelly * 100, 1),
-                        "hist_wr": odds_range["hist_wr"],
-                        "hist_roi": odds_range["hist_roi"],
-                        "odds_label": odds_range["label"],
-                    })
-                    break  # don't double-count
-
-    # Sort by CLV descending
-    signals.sort(key=lambda x: x["clv"], reverse=True)
-    return signals
-
-
-def _kelly_criterion(prob: float, odds: float, fraction: float = KELLY_FRACTION) -> float:
-    """Calculate fractional Kelly stake as % of bankroll."""
-    edge = prob * odds - 1
-    if edge <= 0:
-        return 0
-    kelly = edge / (odds - 1)
-    return max(0, min(kelly * fraction, 0.10))  # cap at 10%
-
-
-# ============================================================================
-# LOGGING
-# ============================================================================
-
-def log_signal(signal: dict, bankroll: float = DEFAULT_BANKROLL):
-    """Log a signal to CSV for P/L tracking."""
-    DATA_DIR.mkdir(exist_ok=True)
-    file_exists = LOG_FILE.exists()
-
-    with open(LOG_FILE, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "timestamp", "league", "home", "away", "strategy", "pick",
-            "opening_odds", "current_odds", "clv", "kelly_pct", "stake_units",
-            "kickoff", "result", "pnl",
-        ])
-        if not file_exists:
-            writer.writeheader()
-
-        stake = round(bankroll * signal["kelly_pct"] / 100, 2)
-        writer.writerow({
-            "timestamp": datetime.now().isoformat(),
-            "league": signal["league"],
-            "home": signal["home"],
-            "away": signal["away"],
-            "strategy": signal["strategy"],
-            "pick": signal["pick"],
-            "opening_odds": signal["opening_odds"],
-            "current_odds": signal["current_odds"],
-            "clv": signal["clv"],
-            "kelly_pct": signal["kelly_pct"],
-            "stake_units": stake,
-            "kickoff": signal["kickoff"],
-            "result": "",  # fill manually after match
-            "pnl": "",
-        })
-
-
-# ============================================================================
-# BACKTEST ON HISTORICAL DATA
-# ============================================================================
-
-def run_backtest(csv_path: str):
-    """Validate strategy on historical Bet365 data."""
+def backtest(path):
     import pandas as pd
+    print(f"\n  Loading {path}..."); df=pd.read_csv(path); print(f"  {len(df)} matches")
+    df["hg"]=df["счет матча"].str.split("-").str[0].astype(float,errors="ignore")
+    df["ag"]=df["счет матча"].str.split("-").str[1].astype(float,errors="ignore")
+    df["hw"]=df["hg"]>df["ag"]; df["aw"]=df["ag"]>df["hg"]
+    df["clv_h"]=df["П1"]-df["П1 ЗАКР"]; df["clv_a"]=df["П2"]-df["П2 ЗАКР"]
+    print(f"\n{'='*60}\n  BACKTEST\n{'='*60}")
+    for sk,cfg in STRATEGIES.items():
+        cc="clv_a" if sk=="away_win" else "clv_h"
+        oc="П2" if sk=="away_win" else "П1"
+        rc="aw" if sk=="away_win" else "hw"
+        print(f"\n  {cfg['emoji']} {cfg['name']}:")
+        for rng in cfg["ranges"]:
+            m=(df[cc]>=cfg["clv_min"])&(df[oc]>=rng["min"])&(df[oc]<=rng["max"])
+            s=df[m].dropna(subset=[rc])
+            if len(s)==0: continue
+            wr=s[rc].mean(); roi=(s[rc]*s[oc]-1).mean()*100; pnl=(s[rc]*s[oc]-1).sum()
+            print(f"    {rng['min']}-{rng['max']}: {len(s)} bets, WR={wr:.1%}, ROI={roi:+.1f}%, P/L={pnl:+.0f}u, ~{len(s)/len(df)*40:.1f}/day")
 
-    print(f"\n  📂 Loading {csv_path}...")
-    df = pd.read_csv(csv_path)
-    print(f"  Loaded {len(df)} matches, {df.columns.size} columns")
-
-    # Parse scores
-    df["home_g"] = df["счет матча"].str.split("-").str[0].astype(float, errors="ignore")
-    df["away_g"] = df["счет матча"].str.split("-").str[1].astype(float, errors="ignore")
-    df["home_win"] = df["home_g"] > df["away_g"]
-    df["away_win"] = df["away_g"] > df["home_g"]
-
-    # CLVs
-    df["clv_h"] = df["П1"] - df["П1 ЗАКР"]
-    df["clv_a"] = df["П2"] - df["П2 ЗАКР"]
-
-    print(f"\n{'='*65}")
-    print(f"  📊 BACKTEST RESULTS")
-    print(f"{'='*65}")
-
-    for strat_key, strat in STRATEGIES.items():
-        if strat_key == "away_win":
-            clv_col, odds_col, outcome_col = "clv_a", "П2", "away_win"
-        else:
-            clv_col, odds_col, outcome_col = "clv_h", "П1", "home_win"
-
-        print(f"\n  {strat['emoji']} {strat['name']} (CLV >= {strat['clv_min']}):")
-
-        for rng in strat["odds_ranges"]:
-            m = (
-                (df[clv_col] >= strat["clv_min"])
-                & (df[odds_col] >= rng["min"])
-                & (df[odds_col] <= rng["max"])
-            )
-            s = df[m].dropna(subset=[outcome_col])
-            if len(s) == 0:
-                continue
-
-            wr = s[outcome_col].mean()
-            roi = (s[outcome_col] * s[odds_col] - 1).mean() * 100
-            pnl = (s[outcome_col] * s[odds_col] - 1).sum()
-            avg_odds = s[odds_col].mean()
-            vol = len(s) / len(df) * 40
-
-            print(f"    Odds {rng['min']}-{rng['max']} ({rng['label']}):")
-            print(f"      Matches:   {len(s)}")
-            print(f"      Win rate:  {wr:.1%}")
-            print(f"      Avg odds:  {avg_odds:.2f}")
-            print(f"      ROI:       {roi:+.1f}%")
-            print(f"      P/L:       {pnl:+.0f}u")
-            print(f"      ~Volume:   {vol:.1f}/day")
-
-    # Combined
-    print(f"\n  📈 COMBINED (all strategies):")
-    m_away = (df["clv_a"] >= 0.30) & (df["П2"] >= 2.00) & (df["П2"] <= 3.50)
-    m_home = (df["clv_h"] >= 0.30) & (df["П1"] >= 1.80) & (df["П1"] <= 2.30)
-
-    for label, mask, odds_col, out_col in [
-        ("Away pool", m_away, "П2", "away_win"),
-        ("Home pool", m_home, "П1", "home_win"),
-    ]:
-        s = df[mask].dropna(subset=[out_col])
-        if len(s) > 0:
-            roi = (s[out_col] * s[odds_col] - 1).mean() * 100
-            pnl = (s[out_col] * s[odds_col] - 1).sum()
-            print(f"    {label}: {len(s)} bets, ROI={roi:+.1f}%, P/L={pnl:+.0f}u")
-
-    total_bets = m_away.sum() + m_home.sum()
-    print(f"    Total volume: ~{total_bets / len(df) * 40:.1f} bets/day")
-
-
-# ============================================================================
-# DISPLAY
-# ============================================================================
-
-def print_header():
-    print()
-    print("=" * 65)
-    print("  ⚽ CLV BETTING MONITOR v1.0")
-    print("  Smart money tracking | Backtested on 110K+ matches")
-    print("=" * 65)
-
-
-def print_signals(signals: list):
-    if not signals:
-        print("\n  😴 No signals right now. Checking again soon...")
-        return
-
-    print(f"\n  🚨 {len(signals)} SIGNAL(S) DETECTED:\n")
-
-    for i, s in enumerate(signals, 1):
-        print(f"  {'─'*60}")
-        print(f"  #{i} {s['emoji']} {s['name']} | {s['league']}")
+def print_hdr():
+    print(f"\n{'='*60}\n  ⚽ CLV MONITOR v2.0 — Free Tier\n  Flashscore (224 leagues) + the-odds-api (50 leagues)\n{'='*60}")
+def print_sigs(sigs):
+    if not sigs: print("\n  😴 No signals."); return
+    print(f"\n  🚨 {len(sigs)} SIGNAL(S):\n")
+    for i,s in enumerate(sigs,1):
+        print(f"  {'─'*50}")
+        print(f"  #{i} {s['emoji']} {s['name']} | {s.get('league','')}")
         print(f"  {s['home']} vs {s['away']}")
-        print(f"  👉 PICK: {s['pick']}")
-        print(f"  📊 Opening: {s['opening_odds']} → Current: {s['current_odds']} (CLV: {s['clv']:+.2f})")
-        print(f"  ⏰ Kickoff in {s['hours_to_kick']}h")
-        print(f"  💰 Kelly stake: {s['kelly_pct']}% of bankroll")
-        print(f"  📈 Historical: WR={s['hist_wr']:.0%}, ROI=+{s['hist_roi']:.0f}%")
-
-    print(f"  {'─'*60}\n")
-
-
-def print_status(snapshots: dict):
-    """Print current monitoring status."""
-    now = datetime.now(timezone.utc)
-    active = 0
-    for key, snap in snapshots.items():
-        try:
-            ko = datetime.fromisoformat(snap["kickoff"].replace("Z", "+00:00"))
-            if ko > now:
-                active += 1
-        except:
-            pass
-    print(f"  📋 Tracking {active} upcoming matches")
-    print(f"  📁 Log: {LOG_FILE}")
-    print(f"  💾 Snapshots: {SNAPSHOTS_FILE}")
-
-
-# ============================================================================
-# MAIN LOOPS
-# ============================================================================
-
-def single_scan():
-    """Run a single scan across all leagues."""
-    print_header()
-
-    snapshots = load_snapshots()
-    all_signals = []
-
-    for sport_key, league_name in LEAGUES.items():
-        print(f"\n  🔍 Scanning {league_name}...")
-        events = fetch_odds(sport_key)
-        if not events:
-            continue
-
-        matches = parse_odds(events)
-        print(f"     Found {len(matches)} matches with odds")
-
-        snapshots = update_snapshots(matches, snapshots)
-        signals = check_signals(matches, snapshots)
-        all_signals.extend(signals)
-
-    print_signals(all_signals)
-    print_status(snapshots)
-
-    # Log signals
-    for signal in all_signals:
-        log_signal(signal)
-
-    return all_signals
-
-
-def continuous_monitor():
-    """Run continuous monitoring loop."""
-    print_header()
-    print(f"\n  🔄 Starting continuous monitor (every {SCAN_INTERVAL_MINUTES} min)")
-    print(f"  Press Ctrl+C to stop\n")
-
-    while True:
-        try:
-            signals = []
-            snapshots = load_snapshots()
-
-            for sport_key, league_name in LEAGUES.items():
-                events = fetch_odds(sport_key)
-                if not events:
-                    continue
-
-                matches = parse_odds(events)
-                snapshots = update_snapshots(matches, snapshots)
-                sigs = check_signals(matches, snapshots)
-                signals.extend(sigs)
-
-            now = datetime.now().strftime("%H:%M:%S")
-            if signals:
-                print(f"\n  [{now}] 🚨 {len(signals)} SIGNAL(S)!")
-                print_signals(signals)
-                for s in signals:
-                    log_signal(s)
-            else:
-                active = sum(1 for s in snapshots.values()
-                             if datetime.fromisoformat(
-                                 s["kickoff"].replace("Z", "+00:00")
-                             ) > datetime.now(timezone.utc))
-                print(f"  [{now}] No signals. Tracking {active} matches. Next scan in {SCAN_INTERVAL_MINUTES}m")
-
-            time.sleep(SCAN_INTERVAL_MINUTES * 60)
-
-        except KeyboardInterrupt:
-            print("\n\n  ✋ Monitor stopped.")
-            break
-        except Exception as e:
-            print(f"  ❌ Error: {e}. Retrying in 60s...")
-            time.sleep(60)
-
-
-# ============================================================================
-# CLI
-# ============================================================================
+        print(f"  👉 {s['pick']} | Open: {s['op']} → Now: {s['cur']} | CLV: {s['clv']:+.2f}")
+        print(f"  ⏰ {s['hrs']}h to kick | 💰 Kelly: {s['kelly']}% | 📈 WR={s['wr']:.0%} ROI=+{s['roi']:.0f}%")
+    print(f"  {'─'*50}\n")
+def print_status(snap,sched=None):
+    now=time.time(); act=sum(1 for s in snap.values() if s.get("ts",0)>now)
+    b=_load_budget(); print(f"  📋 Tracking: {act} | Budget: {b.get('remaining','?')} req | Used today: {b.get('used',0)}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Football CLV Monitor")
-    parser.add_argument("--scan", action="store_true", help="Single scan")
-    parser.add_argument("--backtest", action="store_true", help="Run backtest")
-    parser.add_argument("--backtest-file", type=str, default="data/bet365_historical.csv",
-                        help="Path to historical CSV")
-    parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL,
-                        help="Bankroll for Kelly sizing")
-    args = parser.parse_args()
-
-    DATA_DIR.mkdir(exist_ok=True)
-
-    if args.backtest:
-        run_backtest(args.backtest_file)
-    elif args.scan:
-        single_scan()
+    p=argparse.ArgumentParser(); p.add_argument("--scan",action="store_true")
+    p.add_argument("--schedule",action="store_true"); p.add_argument("--budget",action="store_true")
+    p.add_argument("--backtest",action="store_true"); p.add_argument("--backtest-file",default="data/bet365_historical.csv")
+    a=p.parse_args(); DATA_DIR.mkdir(exist_ok=True)
+    if a.schedule: show_schedule()
+    elif a.budget: print_hdr(); b=_load_budget(); print(f"\n  💰 Remaining: {b.get('remaining','?')} | Today: {b.get('used',0)} | Keys: {len(ODDS_API_KEYS)}\n")
+    elif a.backtest: print_hdr(); backtest(a.backtest_file)
+    elif a.scan: scan()
     else:
-        continuous_monitor()
+        print_hdr(); print(f"\n  🔄 Continuous (every {SCAN_INTERVAL}m). Ctrl+C to stop.\n")
+        while True:
+            try:
+                t=datetime.now().strftime("%H:%M"); sigs=scan(verbose=False)
+                if sigs: print(f"  [{t}] 🚨 {len(sigs)} SIGNAL(S)!"); print_sigs(sigs)
+                else: b=_load_budget(); print(f"  [{t}] No signals. Budget: {b.get('remaining','?')}")
+                time.sleep(SCAN_INTERVAL*60)
+            except KeyboardInterrupt: print("\n  ✋ Stopped."); break
+            except Exception as e: print(f"  ❌ {e}"); time.sleep(60)
 
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
