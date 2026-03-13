@@ -38,21 +38,20 @@ import requests
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 
-# Supported leagues (the-odds-api sport keys)
+# Top priority leagues (1 API request each)
+# Free tier = 500 req/month ≈ 16/day
+# 6 leagues × 2 scans/day = 12 requests = safe
 LEAGUES = {
     "soccer_epl": "🏴 EPL",
     "soccer_spain_la_liga": "🇪🇸 LaLiga",
     "soccer_germany_bundesliga": "🇩🇪 Bundesliga",
     "soccer_italy_serie_a": "🇮🇹 Serie A",
     "soccer_france_ligue_one": "🇫🇷 Ligue 1",
-    "soccer_netherlands_eredivisie": "🇳🇱 Eredivisie",
-    "soccer_portugal_primeira_liga": "🇵🇹 Liga Portugal",
-    "soccer_turkey_super_league": "🇹🇷 Süper Lig",
     "soccer_efl_champ": "🏴 Championship",
-    "soccer_usa_mls": "🇺🇸 MLS",
-    "soccer_brazil_campeonato": "🇧🇷 Serie A",
-    "soccer_mexico_ligamx": "🇲🇽 Liga MX",
 }
+
+# Bookmakers to track (pinnacle = sharpest line, best for CLV)
+BOOKMAKERS = "pinnacle,bet365,williamhill,unibet"
 
 # Strategy parameters (from 110K match backtest)
 STRATEGIES = {
@@ -93,7 +92,7 @@ SCAN_INTERVAL_MINUTES = 30
 # ODDS API
 # ============================================================================
 
-def fetch_odds(sport: str, bookmakers: str = "bet365,pinnacle,williamhill") -> list:
+def fetch_odds(sport: str, bookmakers: str = BOOKMAKERS) -> list:
     """Fetch current odds from the-odds-api.com."""
     if not ODDS_API_KEY:
         print("  ⚠️  ODDS_API_KEY not set. Get free key at https://the-odds-api.com")
