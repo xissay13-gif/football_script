@@ -50,7 +50,7 @@ LEAGUES = {
     "soccer_turkey_super_league": "🇹🇷 Süper Lig",
     "soccer_efl_champ": "🏴 Championship",
     "soccer_usa_mls": "🇺🇸 MLS",
-    "soccer_brazil_serie_a": "🇧🇷 Serie A",
+    "soccer_brazil_campeonato": "🇧🇷 Serie A",
     "soccer_mexico_ligamx": "🇲🇽 Liga MX",
 }
 
